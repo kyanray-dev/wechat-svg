@@ -1,0 +1,4 @@
+interface:
+  display_name: "WeChat SVG Publisher"
+  short_description: "Publish SVG-style WeChat drafts"
+  default_prompt: "Use $wechat-svg-publisher to create and push an SVG-formatted WeChat public account draft."
