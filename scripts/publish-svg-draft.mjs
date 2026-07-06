@@ -20,6 +20,8 @@ Options:
   --file <path>                 Input file. Positional file path is also accepted.
   --title <text>                Draft title. Overrides Markdown frontmatter.
   --cover <path-or-url>         Cover image. Required unless body image upload provides a cover.
+  --type <news|image>           Draft type. Use image for image message / 小绿书.
+  --image-list <items>          Comma-separated image paths/URLs for image message. Max 20.
   --author <text>               Article author.
   --digest <text>               Article summary.
   --source-url <url>            Original article URL.
@@ -53,6 +55,8 @@ function parseArgs(argv) {
     file: "",
     title: "",
     cover: "",
+    type: "",
+    imageList: "",
     author: "",
     digest: "",
     sourceUrl: "",
@@ -82,7 +86,8 @@ function parseArgs(argv) {
     "access-token": "accessToken",
     "env-file": "envFile",
     "tools-md": "toolsMd",
-    "update-media-id": "updateMediaId"
+    "update-media-id": "updateMediaId",
+    "image-list": "imageList"
   };
   const bools = new Set([
     "dry-run",
@@ -282,16 +287,62 @@ function parseFrontmatter(markdown) {
   const match = markdown.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/);
   if (!match) return { attributes: {}, body: markdown };
   const attributes = {};
-  for (const line of match[1].split(/\r?\n/)) {
+  const lines = match[1].split(/\r?\n/);
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
     const item = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
     if (!item) continue;
+    if (!item[2].trim()) {
+      const values = [];
+      let cursor = index + 1;
+      while (cursor < lines.length) {
+        const child = lines[cursor].match(/^\s*-\s+(.+?)\s*$/);
+        if (!child) break;
+        values.push(child[1].trim().replace(/^['"]|['"]$/g, ""));
+        cursor++;
+      }
+      if (values.length) {
+        attributes[item[1]] = values;
+        index = cursor - 1;
+      }
+      continue;
+    }
     let value = item[2].trim();
     value = value.replace(/^['"]|['"]$/g, "");
     if (value === "true") attributes[item[1]] = true;
     else if (value === "false") attributes[item[1]] = false;
+    else if (value.startsWith("[") && value.endsWith("]")) {
+      attributes[item[1]] = value
+        .slice(1, -1)
+        .split(",")
+        .map((part) => part.trim().replace(/^['"]|['"]$/g, ""))
+        .filter(Boolean);
+    }
     else attributes[item[1]] = value;
   }
   return { attributes, body: markdown.slice(match[0].length) };
+}
+
+function parseImageList(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) return value.map(String).map((item) => item.trim()).filter(Boolean);
+  return String(value)
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function extractMarkdownImages(markdown) {
+  const images = [];
+  let content = markdown.replace(/!\[[^\]]*]\(([^)\s]+)(?:\s+"[^"]*")?\)/g, (_match, src) => {
+    images.push(src);
+    return "";
+  });
+  content = content.replace(/<img\b[^>]*?\bsrc\s*=\s*(["'])(.*?)\1[^>]*>/gi, (_match, _quote, src) => {
+    images.push(src);
+    return "";
+  });
+  return { images, content };
 }
 
 function stripUnsafeSvg(content) {
@@ -784,6 +835,11 @@ function normalizeCliAssetReference(ref) {
   return path.resolve(ref);
 }
 
+function normalizeAssetReference(ref, baseDir) {
+  if (!ref || /^(https?:\/\/|data:)/i.test(ref) || path.isAbsolute(ref)) return ref;
+  return path.resolve(baseDir, ref);
+}
+
 async function buildContent(opts) {
   if (!opts.file) throw new Error("Missing --file.");
   const inputPath = path.resolve(opts.file);
@@ -796,6 +852,8 @@ async function buildContent(opts) {
   const metadata = {
     title: opts.title || frontmatter.title || "",
     cover: opts.cover ? normalizeCliAssetReference(opts.cover) : frontmatter.cover || "",
+    type: opts.type || frontmatter.type || "",
+    imageList: parseImageList(opts.imageList || frontmatter.image_list),
     author: opts.author || frontmatter.author || "",
     digest: opts.digest || frontmatter.digest || frontmatter.description || "",
     sourceUrl: opts.sourceUrl || frontmatter.source_url || "",
@@ -804,7 +862,17 @@ async function buildContent(opts) {
   };
 
   let content;
-  if (ext === ".md" || ext === ".markdown") {
+  if ((metadata.type === "image" || metadata.imageList.length > 0) && (ext === ".md" || ext === ".markdown")) {
+    if (!metadata.imageList.length && metadata.type === "image") {
+      const extracted = extractMarkdownImages(parsedMarkdown.body);
+      metadata.imageList = extracted.images;
+      content = stripUnsafeSvg(renderMarkdown(extracted.content, opts));
+    } else {
+      content = stripUnsafeSvg(renderMarkdown(parsedMarkdown.body, opts));
+    }
+    metadata.type = "image";
+    metadata.imageList = metadata.imageList.map((item) => normalizeAssetReference(item, baseDir));
+  } else if (ext === ".md" || ext === ".markdown") {
     const rendered = renderMarkdown(parsedMarkdown.body, opts);
     const shouldWrap = opts.svgWrap !== false;
     content = shouldWrap ? wrapHtmlAsSvg(rendered, opts) : stripUnsafeSvg(rendered);
@@ -917,6 +985,17 @@ async function uploadBodyImages(content, context) {
   return { content: next, uploaded };
 }
 
+async function uploadImageMessageImages(imageList, context) {
+  if (!imageList.length) throw new Error("Image message requires at least one image.");
+  if (imageList.length > 20) throw new Error("Image message image_list supports at most 20 images.");
+  const imageInfoList = [];
+  for (const ref of imageList) {
+    const data = await uploadImageMaterial(ref, context.baseDir, context.accessToken, context.appId, context.cache, context.verbose);
+    imageInfoList.push({ image_media_id: data.media_id });
+  }
+  return imageInfoList;
+}
+
 function pruneUndefined(object) {
   for (const key of Object.keys(object)) {
     if (object[key] === "" || object[key] === undefined || object[key] === null) {
@@ -967,14 +1046,18 @@ async function main() {
 
   if (opts.dryRun) {
     const hasBodyImage = /<(img|image)\b/i.test(built.content);
+    const isImageMessage = built.metadata.type === "image" || built.metadata.imageList.length > 0;
     console.log(JSON.stringify({
       ok: true,
       dryRun: true,
       file: built.inputPath,
       title: built.metadata.title,
+      type: isImageMessage ? "image" : "news",
       cover: built.metadata.cover || null,
+      imageListCount: built.metadata.imageList.length,
+      imageList: built.metadata.imageList,
       bodyHasImageReference: hasBodyImage,
-      coverRequiredForRealPublish: !built.metadata.cover && !hasBodyImage,
+      coverRequiredForRealPublish: isImageMessage ? built.metadata.imageList.length === 0 : !built.metadata.cover && !hasBodyImage,
       contentLength: built.content.length,
       output: opts.out ? path.resolve(opts.out) : null,
       updateMediaId: opts.updateMediaId || null,
@@ -987,6 +1070,52 @@ async function main() {
   const accessToken = await getAccessToken(opts, credentials.appId, credentials.appSecret);
   const cachePath = path.join(getConfigDir(), "upload-cache.json");
   const cache = await readJson(cachePath, {});
+  const isImageMessage = built.metadata.type === "image" || built.metadata.imageList.length > 0;
+
+  if (isImageMessage) {
+    const imageInfoList = await uploadImageMessageImages(built.metadata.imageList, {
+      baseDir: built.baseDir,
+      accessToken,
+      appId: credentials.appId,
+      cache,
+      verbose: opts.verbose
+    });
+    let thumbMediaId = "";
+    if (built.metadata.cover) {
+      const cover = await uploadImageMaterial(built.metadata.cover, built.baseDir, accessToken, credentials.appId, cache, opts.verbose);
+      thumbMediaId = cover.media_id;
+    } else {
+      thumbMediaId = imageInfoList[0]?.image_media_id || "";
+    }
+    await writeJson(cachePath, cache);
+    if (!thumbMediaId) {
+      throw new Error("Image message requires a cover or at least one image.");
+    }
+    const article = pruneUndefined({
+      title: built.metadata.title,
+      thumb_media_id: thumbMediaId,
+      author: built.metadata.author,
+      digest: built.metadata.digest,
+      content: built.content,
+      article_type: "newspic",
+      image_info: { image_list: imageInfoList },
+      need_open_comment: built.metadata.needOpenComment ? 1 : 0,
+      only_fans_can_comment: built.metadata.onlyFansCanComment ? 1 : 0
+    });
+    const data = opts.updateMediaId
+      ? await updateDraft(accessToken, opts.updateMediaId, opts.index, article)
+      : await publishDraft(accessToken, article);
+    console.log(JSON.stringify({
+      ok: true,
+      media_id: opts.updateMediaId || data.media_id,
+      updated: Boolean(opts.updateMediaId),
+      title: built.metadata.title,
+      type: "image",
+      imageListCount: imageInfoList.length,
+      contentLength: built.content.length
+    }, null, 2));
+    return;
+  }
 
   const uploadedBody = await uploadBodyImages(built.content, {
     baseDir: built.baseDir,

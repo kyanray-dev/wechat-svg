@@ -4,6 +4,8 @@
 
 The script creates a standard WeChat Official Account draft through `cgi-bin/draft/add`. The article `content` field contains inline SVG/HTML, while the cover is uploaded first through `cgi-bin/material/add_material?type=image` to obtain `thumb_media_id`.
 
+For image messages / 小绿书, the script uploads each image as a permanent image material, then creates a draft with `article_type: "newspic"` and `image_info: { image_list: [{ image_media_id }] }`. This mirrors the WeChat image-message model used by Wenyan CLI while keeping this skill self-contained.
+
 This is different from generic Markdown-to-WeChat publishers that render Markdown to styled HTML and publish that HTML. This skill preserves SVG markup in the body and uses its bundled Markdown renderer for Markdown input.
 
 ## Good SVG Patterns
@@ -20,6 +22,7 @@ This is different from generic Markdown-to-WeChat publishers that render Markdow
 - `foreignObject` support can vary by WeChat client version. For maximum compatibility, use native SVG text/shapes instead of HTML inside `foreignObject`.
 - Base64 images inside SVG make the draft content large. Prefer local/remote image references that the script can upload to WeChat material storage.
 - Cover images should be normal image assets, not inline SVG.
+- Image messages support at most 20 images. Use local files or remote image URLs; the first image becomes the cover when `cover` is omitted.
 
 ## Troubleshooting
 
