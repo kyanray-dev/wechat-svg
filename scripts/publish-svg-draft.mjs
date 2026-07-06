@@ -3,7 +3,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { spawn } from "node:child_process";
 
 const TOKEN_URL = "https://api.weixin.qq.com/cgi-bin/token";
 const UPLOAD_URL = "https://api.weixin.qq.com/cgi-bin/material/add_material";
@@ -31,8 +30,8 @@ Options:
   --access-token <token>        Use an existing access token.
   --env-file <path>             Load KEY=VALUE entries before resolving credentials.
   --tools-md <path>             Read export WECHAT_APP_ID/SECRET lines.
-  --theme <id>                  wenyan theme for Markdown input. Default: ${DEFAULT_THEME}
-  --highlight <id>              wenyan highlight theme for Markdown input. Default: ${DEFAULT_HIGHLIGHT}
+  --theme <id>                  Built-in Markdown theme. Default: ${DEFAULT_THEME}
+  --highlight <id>              Built-in code block style. Default: ${DEFAULT_HIGHLIGHT}
   --svg-wrap / --no-svg-wrap    Wrap Markdown-rendered HTML in an SVG foreignObject. Default for .md: enabled.
   --width <px>                  SVG wrapper width. Default: 677.
   --height <px>                 SVG wrapper height. Auto-estimated when omitted.
@@ -135,6 +134,12 @@ function parseArgs(argv) {
 }
 
 function getConfigDir() {
+  if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, "wechat-svg-publisher");
+  if (process.env.APPDATA) return path.join(process.env.APPDATA, "wechat-svg-publisher");
+  return path.join(os.homedir(), ".config", "wechat-svg-publisher");
+}
+
+function getLegacyWenyanConfigDir() {
   if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, "wenyan-md");
   if (process.env.APPDATA) return path.join(process.env.APPDATA, "wenyan-md");
   return path.join(os.homedir(), ".config", "wenyan-md");
@@ -198,9 +203,15 @@ async function resolveCredentials(opts) {
     return { appId: envAppId, appSecret: envSecret };
   }
 
-  const credentialPath = path.join(getConfigDir(), "credential.json");
-  const credential = await readJson(credentialPath, {});
-  const accounts = credential.wechat || {};
+  const credentialPaths = [
+    path.join(getConfigDir(), "credential.json"),
+    path.join(getLegacyWenyanConfigDir(), "credential.json")
+  ];
+  let accounts = {};
+  for (const credentialPath of credentialPaths) {
+    const credential = await readJson(credentialPath, {});
+    accounts = { ...accounts, ...(credential.wechat || {}) };
+  }
   if (opts.appId && accounts[opts.appId]?.appSecret) {
     return { appId: opts.appId, appSecret: accounts[opts.appId].appSecret };
   }
@@ -215,7 +226,7 @@ async function resolveCredentials(opts) {
     return { appId: entries[0][0], appSecret: entries[0][1].appSecret };
   }
 
-  throw new Error("Missing WeChat credentials. Set WECHAT_APP_ID/WECHAT_APP_SECRET, pass --app-id/--app-secret, or run `wenyan credential -s`.");
+  throw new Error("Missing WeChat credentials. Set WECHAT_APP_ID/WECHAT_APP_SECRET, pass --app-id/--app-secret, or add credentials to ~/.config/wechat-svg-publisher/credential.json.");
 }
 
 async function wechatJson(res) {
@@ -283,32 +294,335 @@ function parseFrontmatter(markdown) {
   return { attributes, body: markdown.slice(match[0].length) };
 }
 
-async function run(command, args) {
-  return await new Promise((resolve, reject) => {
-    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => stdout += chunk);
-    child.stderr.on("data", (chunk) => stderr += chunk);
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) resolve(stdout);
-      else reject(new Error(`${command} ${args.join(" ")} failed:\n${stderr || stdout}`));
-    });
-  });
-}
-
-async function renderMarkdown(file, opts) {
-  const args = ["render", "-f", file, "-t", opts.theme, "-h", opts.highlight];
-  return await run("wenyan", args);
-}
-
 function stripUnsafeSvg(content) {
   return content
     .replace(/<\?xml[\s\S]*?\?>/gi, "")
     .replace(/<!doctype[\s\S]*?>/gi, "")
     .replace(/<script\b[\s\S]*?<\/script>/gi, "")
     .replace(/\s+on[a-z]+\s*=\s*(["']).*?\1/gi, "");
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function escapeHtmlAttr(value) {
+  return escapeHtml(value).replace(/"/g, "&quot;");
+}
+
+function slugify(value) {
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/<[^>]+>/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 80);
+}
+
+function styleObjectToString(style) {
+  return Object.entries(style)
+    .map(([key, value]) => `${key}:${value}`)
+    .join(";");
+}
+
+function markdownThemeStyles(theme = DEFAULT_THEME, highlight = DEFAULT_HIGHLIGHT) {
+  const base = {
+    article: {
+      "box-sizing": "border-box",
+      width: "100%",
+      margin: "0",
+      padding: "34px 30px 42px",
+      background: "#fff",
+      color: "#1f2933",
+      "font-family": "-apple-system,BlinkMacSystemFont,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',Arial,sans-serif",
+      "font-size": "17px",
+      "line-height": "1.82",
+      "letter-spacing": "0"
+    },
+    h1: {
+      margin: "0 0 26px",
+      color: "#111827",
+      "font-size": "28px",
+      "line-height": "1.35",
+      "font-weight": "700"
+    },
+    h2: {
+      margin: "34px 0 14px",
+      padding: "0 0 0 12px",
+      color: "#111827",
+      "font-size": "23px",
+      "line-height": "1.45",
+      "font-weight": "700",
+      "border-left": "4px solid #2f6feb"
+    },
+    h3: {
+      margin: "28px 0 12px",
+      color: "#111827",
+      "font-size": "20px",
+      "line-height": "1.5",
+      "font-weight": "700"
+    },
+    p: {
+      margin: "0 0 18px"
+    },
+    blockquote: {
+      margin: "22px 0",
+      padding: "12px 16px",
+      color: "#4b5563",
+      background: "#f7f9fc",
+      "border-left": "4px solid #9aa8ba"
+    },
+    ul: {
+      margin: "0 0 18px 0",
+      padding: "0 0 0 24px"
+    },
+    ol: {
+      margin: "0 0 18px 0",
+      padding: "0 0 0 24px"
+    },
+    li: {
+      margin: "6px 0"
+    },
+    pre: {
+      margin: "22px 0",
+      padding: "14px 16px",
+      background: highlight === "dark" ? "#111827" : "#f6f8fa",
+      color: highlight === "dark" ? "#e5e7eb" : "#24292f",
+      "border-radius": "6px",
+      overflow: "auto",
+      "font-size": "14px",
+      "line-height": "1.65"
+    },
+    code: {
+      "font-family": "ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono',monospace",
+      "font-size": "0.92em"
+    },
+    inlineCode: {
+      padding: "2px 5px",
+      background: "#f1f5f9",
+      color: "#be123c",
+      "border-radius": "4px"
+    },
+    hr: {
+      margin: "30px 0",
+      border: "0",
+      "border-top": "1px solid #d8dee9"
+    },
+    img: {
+      display: "block",
+      width: "100%",
+      height: "auto",
+      margin: "22px auto",
+      "border-radius": "6px"
+    },
+    table: {
+      width: "100%",
+      margin: "22px 0",
+      "border-collapse": "collapse",
+      "font-size": "15px"
+    },
+    th: {
+      padding: "8px 10px",
+      background: "#f6f8fa",
+      border: "1px solid #d8dee9",
+      "font-weight": "700",
+      "text-align": "left"
+    },
+    td: {
+      padding: "8px 10px",
+      border: "1px solid #d8dee9",
+      "text-align": "left"
+    },
+    a: {
+      color: "#2563eb",
+      "text-decoration": "none"
+    }
+  };
+
+  if (theme === "ink") {
+    base.article.background = "#fbfaf7";
+    base.article.color = "#171717";
+    base.h2["border-left"] = "4px solid #171717";
+    base.blockquote.background = "#f1eee8";
+  } else if (theme === "rose") {
+    base.article.background = "#fff7f9";
+    base.h2["border-left"] = "4px solid #e85d86";
+    base.blockquote.background = "#fff0f4";
+    base.a.color = "#d6336c";
+  }
+  return base;
+}
+
+function inlineMarkdown(text, styles) {
+  const placeholders = [];
+  function hold(html) {
+    const key = `\u0000${placeholders.length}\u0000`;
+    placeholders.push(html);
+    return key;
+  }
+
+  let output = escapeHtml(text);
+  output = output.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g, (_m, alt, src, title) => {
+    const titleAttr = title ? ` title="${escapeHtmlAttr(title)}"` : "";
+    return hold(`<img src="${escapeHtmlAttr(src)}" alt="${escapeHtmlAttr(alt)}"${titleAttr} style="${styleObjectToString(styles.img)}"/>`);
+  });
+  output = output.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g, (_m, label, href, title) => {
+    const titleAttr = title ? ` title="${escapeHtmlAttr(title)}"` : "";
+    return hold(`<a href="${escapeHtmlAttr(href)}"${titleAttr} style="${styleObjectToString(styles.a)}">${label}</a>`);
+  });
+  output = output.replace(/`([^`]+)`/g, (_m, code) => {
+    return hold(`<code style="${styleObjectToString({ ...styles.code, ...styles.inlineCode })}">${escapeHtml(code)}</code>`);
+  });
+  output = output
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
+    .replace(/_([^_\n]+)_/g, "<em>$1</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>");
+
+  return output.replace(/\u0000(\d+)\u0000/g, (_m, index) => placeholders[Number(index)] || "");
+}
+
+function isTableSeparator(line) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+}
+
+function splitTableRow(line) {
+  return line
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function renderMarkdownTable(lines, styles) {
+  const headers = splitTableRow(lines[0]);
+  const rows = lines.slice(2).map(splitTableRow);
+  return `<table style="${styleObjectToString(styles.table)}"><thead><tr>${headers.map((cell) => `<th style="${styleObjectToString(styles.th)}">${inlineMarkdown(cell, styles)}</th>`).join("")}</tr></thead><tbody>${rows.map((row) => `<tr>${row.map((cell) => `<td style="${styleObjectToString(styles.td)}">${inlineMarkdown(cell, styles)}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+}
+
+function renderMarkdown(markdown, opts) {
+  const styles = markdownThemeStyles(opts.theme, opts.highlight);
+  const lines = markdown.replace(/\r\n?/g, "\n").split("\n");
+  const blocks = [];
+  let paragraph = [];
+  let list = null;
+  let blockquote = [];
+
+  function flushParagraph() {
+    if (!paragraph.length) return;
+    const text = paragraph.join(" ").trim();
+    if (text) blocks.push(`<p style="${styleObjectToString(styles.p)}">${inlineMarkdown(text, styles)}</p>`);
+    paragraph = [];
+  }
+
+  function flushList() {
+    if (!list) return;
+    const tag = list.type;
+    blocks.push(`<${tag} style="${styleObjectToString(styles[tag])}">${list.items.map((item) => `<li style="${styleObjectToString(styles.li)}">${inlineMarkdown(item, styles)}</li>`).join("")}</${tag}>`);
+    list = null;
+  }
+
+  function flushBlockquote() {
+    if (!blockquote.length) return;
+    const text = blockquote.join(" ").trim();
+    if (text) blocks.push(`<blockquote style="${styleObjectToString(styles.blockquote)}">${inlineMarkdown(text, styles)}</blockquote>`);
+    blockquote = [];
+  }
+
+  function flushAll() {
+    flushParagraph();
+    flushList();
+    flushBlockquote();
+  }
+
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      flushAll();
+      continue;
+    }
+
+    const fence = trimmed.match(/^```([A-Za-z0-9_-]+)?\s*$/);
+    if (fence) {
+      flushAll();
+      const lang = fence[1] || "";
+      const code = [];
+      index++;
+      while (index < lines.length && !lines[index].trim().startsWith("```")) {
+        code.push(lines[index]);
+        index++;
+      }
+      const langAttr = lang ? ` data-language="${escapeHtmlAttr(lang)}"` : "";
+      blocks.push(`<pre style="${styleObjectToString(styles.pre)}"${langAttr}><code style="${styleObjectToString(styles.code)}">${escapeHtml(code.join("\n"))}</code></pre>`);
+      continue;
+    }
+
+    if (/^---+$|^\*\*\*+$|^___+$/u.test(trimmed)) {
+      flushAll();
+      blocks.push(`<hr style="${styleObjectToString(styles.hr)}"/>`);
+      continue;
+    }
+
+    if (index + 1 < lines.length && trimmed.includes("|") && isTableSeparator(lines[index + 1])) {
+      flushAll();
+      const tableLines = [line, lines[index + 1]];
+      index += 2;
+      while (index < lines.length && lines[index].trim().includes("|")) {
+        tableLines.push(lines[index]);
+        index++;
+      }
+      index--;
+      blocks.push(renderMarkdownTable(tableLines, styles));
+      continue;
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/);
+    if (heading) {
+      flushAll();
+      const level = Math.min(3, heading[1].length);
+      const tag = `h${level}`;
+      const content = inlineMarkdown(heading[2].replace(/\s+#+$/, ""), styles);
+      const id = slugify(heading[2]);
+      const idAttr = id ? ` id="${escapeHtmlAttr(id)}"` : "";
+      blocks.push(`<${tag}${idAttr} style="${styleObjectToString(styles[tag])}">${content}</${tag}>`);
+      continue;
+    }
+
+    const quote = trimmed.match(/^>\s?(.*)$/);
+    if (quote) {
+      flushParagraph();
+      flushList();
+      blockquote.push(quote[1]);
+      continue;
+    }
+
+    const unordered = trimmed.match(/^[-*+]\s+(.+)$/);
+    const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+    if (unordered || ordered) {
+      flushParagraph();
+      flushBlockquote();
+      const type = unordered ? "ul" : "ol";
+      if (!list || list.type !== type) flushList();
+      if (!list) list = { type, items: [] };
+      list.items.push((unordered || ordered)[1]);
+      continue;
+    }
+
+    flushList();
+    flushBlockquote();
+    paragraph.push(trimmed);
+  }
+
+  flushAll();
+  return `<article style="${styleObjectToString(styles.article)}">${blocks.join("\n")}</article>`;
 }
 
 function escapeAttr(value) {
@@ -476,7 +790,8 @@ async function buildContent(opts) {
   const ext = path.extname(inputPath).toLowerCase();
   const raw = await fs.readFile(inputPath, "utf8");
   const baseDir = path.dirname(inputPath);
-  const frontmatter = ext === ".md" || ext === ".markdown" ? parseFrontmatter(raw).attributes : {};
+  const parsedMarkdown = ext === ".md" || ext === ".markdown" ? parseFrontmatter(raw) : { attributes: {}, body: raw };
+  const frontmatter = parsedMarkdown.attributes;
 
   const metadata = {
     title: opts.title || frontmatter.title || "",
@@ -490,7 +805,7 @@ async function buildContent(opts) {
 
   let content;
   if (ext === ".md" || ext === ".markdown") {
-    const rendered = await renderMarkdown(inputPath, opts);
+    const rendered = renderMarkdown(parsedMarkdown.body, opts);
     const shouldWrap = opts.svgWrap !== false;
     content = shouldWrap ? wrapHtmlAsSvg(rendered, opts) : stripUnsafeSvg(rendered);
   } else if (ext === ".svg") {

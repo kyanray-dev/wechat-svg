@@ -1,11 +1,11 @@
 ---
 name: wechat-svg-publisher
-description: "Publish SVG-formatted content to a WeChat Official Account draft. Use when the user wants to push inline SVG, SVG-based layout, SVG long-form article artwork, or Markdown rendered through wenyan-cli into the WeChat public account draft box; supports WeChat credentials, cover upload, local/remote image material upload, and draft creation."
+description: "Publish SVG-formatted content to a WeChat Official Account draft. Use when the user wants to push inline SVG, SVG-based layout, SVG long-form article artwork, or Markdown rendered by the built-in renderer into the WeChat public account draft box; supports WeChat credentials, cover upload, local/remote image material upload, and draft creation."
 ---
 
 # wechat-svg-publisher
 
-Create and publish SVG-style WeChat Official Account drafts. Prefer this skill when the draft body should preserve inline `<svg>` markup or when a Markdown article needs to be rendered with `wenyan-cli` and wrapped as an SVG surface before being pushed to the draft box.
+Create and publish SVG-style WeChat Official Account drafts. Prefer this skill when the draft body should preserve inline `<svg>` markup or when a Markdown article needs to be rendered with the bundled renderer and wrapped as an SVG surface before being pushed to the draft box.
 
 ## Quick Start
 
@@ -18,7 +18,7 @@ node /Users/kyan/.codex/skills/wechat-svg-publisher/scripts/publish-svg-draft.mj
   --cover /path/to/cover.jpg
 ```
 
-For Markdown input, the script calls `wenyan render` first, then wraps the rendered HTML in an inline SVG by default:
+For Markdown input, the script uses its built-in Markdown renderer, then wraps the rendered HTML in an inline SVG by default:
 
 ```bash
 node /Users/kyan/.codex/skills/wechat-svg-publisher/scripts/publish-svg-draft.mjs \
@@ -35,7 +35,7 @@ Use `--dry-run --out /tmp/wechat-svg-preview.html` before a real publish when th
 
 - `.svg`: publish the SVG inline in the draft body. The script strips XML declarations, doctype, `<script>` blocks, and inline event handler attributes before publish.
 - `.html`: publish HTML as-is; inline SVG inside the HTML is preserved.
-- `.md`: read frontmatter, run `wenyan render`, and wrap the rendered article in `<svg><foreignObject>...`.
+- `.md`: read frontmatter, render Markdown with the bundled renderer, and wrap the rendered article in `<svg><foreignObject>...`.
 
 For SVG input, the script expands simple `.class { ... }` rules from `<style>` into element attributes before publishing because WeChat strips SVG `<style>` blocks in draft previews.
 
@@ -50,9 +50,10 @@ Credentials are resolved in this order:
 1. `--app-id` plus `--app-secret`
 2. `WECHAT_APP_ID` and `WECHAT_APP_SECRET`
 3. export lines in `--tools-md` or `$HOME/.openclaw/workspace/TOOLS.md`
-4. wenyan credential storage at `$XDG_CONFIG_HOME/wenyan-md/credential.json` or `~/.config/wenyan-md/credential.json`
+4. skill credential storage at `$XDG_CONFIG_HOME/wechat-svg-publisher/credential.json` or `~/.config/wechat-svg-publisher/credential.json`
+5. legacy wenyan-compatible credential storage at `$XDG_CONFIG_HOME/wenyan-md/credential.json` or `~/.config/wenyan-md/credential.json`
 
-The script reuses wenyan-compatible token and upload caches under the same config directory.
+The script stores token and upload caches under the skill config directory. It can read legacy wenyan-compatible credentials only as a fallback, but it does not require or call `wenyan-cli`.
 
 ## Common Commands
 
@@ -66,7 +67,7 @@ node /Users/kyan/.codex/skills/wechat-svg-publisher/scripts/publish-svg-draft.mj
   --author "作者名"
 ```
 
-Render Markdown with wenyan but publish normal HTML instead of an SVG wrapper:
+Render Markdown with the built-in renderer but publish normal HTML instead of an SVG wrapper:
 
 ```bash
 node /Users/kyan/.codex/skills/wechat-svg-publisher/scripts/publish-svg-draft.mjs \
